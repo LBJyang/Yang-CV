@@ -1,0 +1,8 @@
+{
+  "name": "Yang's AI Portfolio",
+  "description": "Premium personal portfolio and AI assistant of Fan Yang - 15 Years Enterprise Vet & Master of AI Candidate at UoA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

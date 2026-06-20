@@ -63,7 +63,7 @@ export default function App() {
   const [showTraditionalCV, setShowTraditionalCV] = useState(false);
 
   const messageEndRef = useRef<HTMLDivElement>(null);
-  const prevMsgCountRef = useRef<number>(0);
+  const prevMsgCountRef = useRef<number>(chatMessages.length);
 
   // Check if API key is active behind the scenes (for visual status indicator)
   useEffect(() => {

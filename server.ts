@@ -31,6 +31,57 @@ function getGemini(): GoogleGenAI {
   return aiInstance;
 }
 
+// Helper to invoke Gemini with retries and a fallback model in case of rate limits or service unavailability
+async function generateContentWithFallback(
+  ai: GoogleGenAI,
+  modelName: string,
+  contents: any,
+  config: any
+) {
+  const primaryModel = modelName;
+  const fallbackModel = "gemini-2.5-flash";
+  const maxRetries = 2;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[Gemini] Calling ${primaryModel} (Attempt ${attempt}/${maxRetries})...`);
+      const response = await ai.models.generateContent({
+        model: primaryModel,
+        contents,
+        config,
+      });
+      return response;
+    } catch (err: any) {
+      console.error(`[Gemini] Error with ${primaryModel} on attempt ${attempt}:`, err.message || err);
+      
+      // If it's a client error (e.g. key missing, bad request, except rate limits), don't retry or fall back
+      if (err.message === "GEMINI_API_KEY_MISSING" || (err.status && err.status >= 400 && err.status < 500 && err.status !== 429)) {
+        throw err;
+      }
+      
+      if (attempt < maxRetries) {
+        const delay = attempt * 1000;
+        console.log(`[Gemini] Retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  // If retries failed, fall back to gemini-2.5-flash
+  console.log(`[Gemini] Falling back to stable model: ${fallbackModel}`);
+  try {
+    const response = await ai.models.generateContent({
+      model: fallbackModel,
+      contents,
+      config,
+    });
+    return response;
+  } catch (err: any) {
+    console.error(`[Gemini] Fallback to ${fallbackModel} failed:`, err.message || err);
+    throw err;
+  }
+}
+
 // Resume Data for the Digital Twin & Analyzer
 const YANG_PROFILE = {
   name: "Fan Yang",
@@ -215,14 +266,15 @@ app.post("/api/chat", async (req, res) => {
       parts: [{ text: message }]
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: formattedHistory,
-      config: {
+    const response = await generateContentWithFallback(
+      ai,
+      "gemini-3.5-flash",
+      formattedHistory,
+      {
         systemInstruction: TWIN_SYSTEM_INSTRUCTION,
         temperature: 0.7,
       }
-    });
+    );
 
     const reply = response.text || "I apologize, but I could not process that request currently. Feel free to ask another question about Yang's certifications or enterprise experience.";
     return res.json({ text: reply });
@@ -281,15 +333,16 @@ app.post("/api/analyze-jd", async (req, res) => {
   try {
     const ai = getGemini();
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: `Perform fit analysis for this job description:\n\n${jd}`,
-      config: {
+    const response = await generateContentWithFallback(
+      ai,
+      "gemini-3.5-flash",
+      `Perform fit analysis for this job description:\n\n${jd}`,
+      {
         systemInstruction: JD_ANALYZER_INSTRUCTION,
         responseMimeType: "application/json",
         temperature: 0.2,
       }
-    });
+    );
 
     const analysisText = response.text;
     if (!analysisText) {

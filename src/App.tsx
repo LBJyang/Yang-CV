@@ -63,6 +63,7 @@ export default function App() {
   const [showTraditionalCV, setShowTraditionalCV] = useState(false);
 
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const prevMsgCountRef = useRef<number>(0);
 
   // Check if API key is active behind the scenes (for visual status indicator)
   useEffect(() => {
@@ -70,9 +71,12 @@ export default function App() {
     setIsLiveApi(true);
   }, []);
 
-  // Scroll to bottom of chat
+  // Scroll to bottom of chat only when a NEW message is added (not on initial render)
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (chatMessages.length > prevMsgCountRef.current) {
+      messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    prevMsgCountRef.current = chatMessages.length;
   }, [chatMessages, chatLoading]);
 
   // JD Template population

@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import fs from "fs";
 
 dotenv.config();
 
@@ -10,6 +11,113 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Memory cache for IP geolocation to avoid rate-limiting on ip-api.com
+const ipGeoCache = new Map<string, { country: string; region: string; city: string; isp: string }>();
+
+// Helper to resolve geolocation via ip-api.com
+async function resolveIpGeo(ip: string) {
+  // If local/loopback IP, skip API call
+  if (ip === "127.0.0.1" || ip === "::1" || ip === "localhost") {
+    return { country: "Localhost", region: "Local", city: "Local", isp: "Internal Loopback" };
+  }
+
+  if (ipGeoCache.has(ip)) {
+    return ipGeoCache.get(ip)!;
+  }
+
+  try {
+    const res = await fetch(`http://ip-api.com/json/${ip}`);
+    if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+    const data = await res.json();
+    if (data.status === "success") {
+      const geo = {
+        country: data.country || "Unknown",
+        region: data.regionName || "Unknown",
+        city: data.city || "Unknown",
+        isp: data.isp || "Unknown",
+      };
+      ipGeoCache.set(ip, geo);
+      return geo;
+    }
+  } catch (err: any) {
+    // Fail silently, caller handles fallback
+  }
+
+  return { country: "", region: "", city: "", isp: "" };
+}
+
+// Visitor logging middleware
+app.use((req, res, next) => {
+  // Discard logging for static assets, favicons, or audit page to avoid spamming the log
+  const pathName = req.path;
+  if (
+    pathName.startsWith("/assets/") ||
+    pathName.startsWith("/api/audit/") ||
+    pathName.startsWith("/audit") ||
+    pathName.endsWith(".png") ||
+    pathName.endsWith(".jpg") ||
+    pathName.endsWith(".jpeg") ||
+    pathName.endsWith(".svg") ||
+    pathName.endsWith(".ico") ||
+    pathName.endsWith(".json") ||
+    pathName.endsWith(".js") ||
+    pathName.endsWith(".css")
+  ) {
+    return next();
+  }
+
+  // Get real visitor IP address (considering Cloudflare and proxies)
+  const ip = (req.headers["cf-connecting-ip"] ||
+    req.headers["x-real-ip"] ||
+    req.headers["x-forwarded-for"] ||
+    req.socket.remoteAddress ||
+    "") as string;
+
+  // Remove IPv6 prefix if mapped IPv4 (e.g. ::ffff:127.0.0.1)
+  const cleanedIp = ip.startsWith("::ffff:") ? ip.substring(7) : ip;
+
+  const timestamp = new Date().toISOString();
+  const userAgent = req.headers["user-agent"] || "";
+  const countryCode = (req.headers["cf-ipcountry"] || "") as string;
+
+  // Create log entry object
+  const logEntry: any = {
+    timestamp,
+    ip: cleanedIp,
+    countryCode,
+    path: pathName,
+    userAgent,
+    country: countryCode || "Unknown",
+    region: "Unknown",
+    city: "Unknown",
+    isp: "Unknown",
+  };
+
+  // Perform background async resolution of details
+  resolveIpGeo(cleanedIp)
+    .then((geo) => {
+      logEntry.country = geo.country || logEntry.country;
+      logEntry.region = geo.region || "Unknown";
+      logEntry.city = geo.city || "Unknown";
+      logEntry.isp = geo.isp || "Unknown";
+    })
+    .catch((err) => {
+      console.error(`[Audit] Failed to resolve geo IP for ${cleanedIp}:`, err.message);
+    })
+    .finally(() => {
+      // Append to JSONL file
+      const logLine = JSON.stringify(logEntry) + "\n";
+      const visitsPath = path.join(process.cwd(), "visits.jsonl");
+      fs.appendFile(visitsPath, logLine, (err) => {
+        if (err) {
+          console.error("[Audit] Error writing to visits.jsonl:", err);
+        }
+      });
+    });
+
+  next();
+});
 
 // Lazy-loaded Gemini initialization to prevent crash if key is missing or placeholder
 let aiInstance: GoogleGenAI | null = null;
@@ -437,8 +545,46 @@ app.post("/api/analyze-jd", async (req, res) => {
   }
 });
 
+// Route to retrieve visitor audit logs (requires password header)
+app.get("/api/audit/logs", (req, res) => {
+  const authHeader = req.headers["authorization"];
+  const password = authHeader ? authHeader.replace("Bearer ", "").trim() : "";
+  const expectedPassword = (process.env.AUDIT_PASSWORD || "0508").trim();
+
+  if (password !== expectedPassword) {
+    return res.status(401).json({ error: "Unauthorized. Incorrect audit password." });
+  }
+
+  const visitsPath = path.join(process.cwd(), "visits.jsonl");
+  if (!fs.existsSync(visitsPath)) {
+    return res.json([]);
+  }
+
+  fs.readFile(visitsPath, "utf8", (err, data) => {
+    if (err) {
+      console.error("[Audit] Failed to read visits.jsonl:", err);
+      return res.status(500).json({ error: "Failed to read logs." });
+    }
+
+    const lines = data.trim().split("\n").filter(Boolean);
+    const logs = lines.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (e) {
+        return null;
+      }
+    }).filter(Boolean);
+
+    // Return the logs in reverse chronological order (newest first)
+    res.json(logs.reverse());
+  });
+});
+
 // Setup Vite Dev Server / Static Ingress routing
 async function initServer() {
+  // Serve the audit dashboard
+  app.use("/audit", express.static(path.join(process.cwd(), "audit")));
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
